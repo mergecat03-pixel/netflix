@@ -16,10 +16,8 @@
             --text-secondary: #8888aa;
             --text-muted: #555577;
             --accent: #7c3aed;
-            --accent-hover: #8b5cf6;
             --accent-glow: rgba(124, 58, 237, 0.3);
             --success: #10b981;
-            --warning: #f59e0b;
             --radius: 16px;
             --shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
         }
@@ -164,7 +162,7 @@
         .result-item .label { color: var(--text-secondary); font-size: 0.75rem; }
         .result-item .value {
             font-weight: 600;
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             word-break: break-all;
             text-align: right;
             max-width: 55%;
@@ -238,7 +236,6 @@
 
     <div class="app-wrapper">
 
-        <!-- HEADER -->
         <header class="header">
             <div class="header-left">
                 <div class="header-icon"><i class="ri-flashlight-fill"></i></div>
@@ -249,7 +246,6 @@
             </div>
         </header>
 
-        <!-- CARD -->
         <div class="card">
             <div class="input-group">
                 <label><i class="ri-stack-line"></i> Jumlah Token</label>
@@ -280,18 +276,15 @@
             </div>
         </div>
 
-        <!-- RESULT -->
         <div class="card result-card" id="resultCard">
             <div id="resultContent"></div>
         </div>
 
-        <!-- FOOTER -->
         <div class="footer">
             Made with <i class="ri-heart-fill"></i> by <strong>Kaze</strong>
         </div>
     </div>
 
-    <!-- TOAST -->
     <div class="toast" id="toast">
         <i class="ri-checkbox-circle-fill"></i>
         <span id="toastMsg">Berhasil!</span>
@@ -299,7 +292,7 @@
 
     <script>
         let isRunning = false;
-        let eventSource = null;
+        let statusInterval = null;
 
         const generateBtn = document.getElementById('generateBtn');
         const progressContainer = document.getElementById('progressContainer');
@@ -347,41 +340,59 @@
             });
         }
 
-        function updateProgress(data) {
-            if (data.total) {
-                const pct = Math.min(100, Math.round((data.current || 0) / data.total * 100));
-                progressBar.style.width = pct + '%';
-            }
-            if (data.message) {
-                progressMessage.textContent = data.message;
-            }
-            if (data.results) {
-                showResults(data);
-            }
+        function updateStatus() {
+            fetch('/api/status')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.running) {
+                        const pct = Math.min(100, Math.round((data.progress || 0) / (data.total || 1) * 100));
+                        progressBar.style.width = pct + '%';
+                        progressMessage.textContent = data.message || `Memproses ${data.progress}/${data.total}`;
+                        
+                        if (data.results && data.results.length > 0) {
+                            showResults(data.results);
+                        }
+                    } else {
+                        // Selesai
+                        if (statusInterval) {
+                            clearInterval(statusInterval);
+                            statusInterval = null;
+                        }
+                        generateBtn.disabled = false;
+                        generateBtn.classList.remove('loading');
+                        generateBtn.innerHTML = '<i class="ri-rocket-2-fill"></i><span class="btn-text">Generate Token</span>';
+                        isRunning = false;
+                        
+                        if (data.results && data.results.length > 0) {
+                            showResults(data.results);
+                            progressMessage.textContent = `✅ Selesai! ${data.results.length} token`;
+                            showToast(`✅ ${data.results.length} token berhasil!`);
+                        }
+                    }
+                })
+                .catch(err => {
+                    console.error('Status error:', err);
+                });
         }
 
-        function showResults(data) {
+        function showResults(results) {
             resultCard.classList.add('show');
             let html = '';
 
-            if (data.results && data.results.length > 0) {
-                data.results.forEach((r, idx) => {
-                    const planClass = r.plan === 'premium' ? 'plan-premium' : r.plan === 'standard' ? 'plan-standard' : 'plan-basic';
-                    const planIcon = r.plan === 'premium' ? '⭐' : r.plan === 'standard' ? '📦' : '🔹';
-                    html += `
-                        <div class="result-item">
-                            <span class="label">#${idx + 1} ${planIcon} ${r.plan}</span>
-                            <span class="value url">${r.url}</span>
-                            <button class="copy-btn-sm" onclick="copyText('${r.url}', this)">📋 Copy</button>
-                        </div>
-                        <div style="font-size:0.6rem;color:#555577;padding-left:8px;margin-bottom:6px;">
-                            Exp: ${r.expires || '-'} | ${r.quality || '-'} | ${r.country || '-'}
-                        </div>
-                    `;
-                });
-            } else {
-                html = `<div style="text-align:center;color:#555577;padding:20px;">Tidak ada token yang dihasilkan</div>`;
-            }
+            results.forEach((r, idx) => {
+                const planClass = r.plan === 'premium' ? 'plan-premium' : r.plan === 'standard' ? 'plan-standard' : 'plan-basic';
+                const planIcon = r.plan === 'premium' ? '⭐' : r.plan === 'standard' ? '📦' : '🔹';
+                html += `
+                    <div class="result-item">
+                        <span class="label">#${idx + 1} ${planIcon} ${r.plan}</span>
+                        <span class="value url">${r.url}</span>
+                        <button class="copy-btn-sm" onclick="copyText('${r.url}', this)">📋 Copy</button>
+                    </div>
+                    <div style="font-size:0.6rem;color:#555577;padding-left:8px;margin-bottom:6px;">
+                        Exp: ${r.expires || '-'} | ${r.quality || '-'} | ${r.country || '-'}
+                    </div>
+                `;
+            });
 
             resultContent.innerHTML = html;
         }
@@ -410,50 +421,37 @@
             progressMessage.textContent = 'Memulai...';
             resultCard.classList.remove('show');
 
-            const eventSource = new EventSource('/api/start?' + new URLSearchParams({ count, plan }));
-
-            eventSource.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'progress') {
-                        updateProgress(data);
-                    } else if (data.type === 'complete') {
-                        updateProgress(data);
-                        generateBtn.disabled = false;
-                        generateBtn.classList.remove('loading');
-                        generateBtn.innerHTML = '<i class="ri-rocket-2-fill"></i><span class="btn-text">Generate Token</span>';
-                        isRunning = false;
-                        eventSource.close();
-                        showToast('✅ Selesai!');
-                    } else if (data.type === 'error') {
-                        progressMessage.textContent = '❌ ' + data.message;
-                        generateBtn.disabled = false;
-                        generateBtn.classList.remove('loading');
-                        generateBtn.innerHTML = '<i class="ri-rocket-2-fill"></i><span class="btn-text">Generate Token</span>';
-                        isRunning = false;
-                        eventSource.close();
-                        showToast('❌ Error: ' + data.message);
-                    }
-                } catch (e) {
-                    console.error('Parse error:', e);
-                }
-            };
-
-            eventSource.onerror = (error) => {
-                console.error('SSE error:', error);
-                if (isRunning) {
+            fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ count, plan })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    showToast('✅ Proses dimulai!');
+                    if (statusInterval) clearInterval(statusInterval);
+                    statusInterval = setInterval(updateStatus, 2000);
+                    setTimeout(updateStatus, 500);
+                } else {
+                    showToast('❌ ' + data.error);
                     generateBtn.disabled = false;
                     generateBtn.classList.remove('loading');
                     generateBtn.innerHTML = '<i class="ri-rocket-2-fill"></i><span class="btn-text">Generate Token</span>';
                     isRunning = false;
-                    eventSource.close();
-                    showToast('❌ Koneksi terputus');
                 }
-            };
+            })
+            .catch(err => {
+                showToast('❌ Error: ' + err.message);
+                generateBtn.disabled = false;
+                generateBtn.classList.remove('loading');
+                generateBtn.innerHTML = '<i class="ri-rocket-2-fill"></i><span class="btn-text">Generate Token</span>';
+                isRunning = false;
+            });
         }
 
         console.log('🚀 NFTOKEN Scraper loaded!');
     </script>
 
 </body>
-      </html>
+    </html>
