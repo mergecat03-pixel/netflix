@@ -25,25 +25,17 @@ app.use(express.static('public'));
 const SITE = process.env.NFT_SITE || 'http://nftools.aroshi.my.id';
 const TARGET_HOST = new URL(SITE).hostname;
 const TARGET_PORT = Number(new URL(SITE).port || 80);
-const UA_DEFAULT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
 const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
   'Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-  'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36',
-  'Mozilla/5.0 (Linux; Android 12; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36',
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
-  'Mozilla/5.0 (Linux; Android 14; Redmi Note 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-  'Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
 ];
+
 const PLANS = ['premium', 'standard', 'basic'];
 
 const PROXY_SOURCES = [
@@ -52,9 +44,7 @@ const PROXY_SOURCES = [
   'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
 ];
 
-let FORCED_UA = null;
 function pickUA() {
-  if (FORCED_UA) return FORCED_UA;
   return UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 }
 
@@ -67,9 +57,6 @@ function browserHeaders(extra = {}) {
     'Accept-Language': 'en-US,en;q=0.9',
     'Origin': SITE,
     'Referer': SITE + '/nftoken',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
   }, extra);
 }
 
@@ -105,7 +92,10 @@ async function fetchProxyLines() {
   let lines = [];
   for (const src of PROXY_SOURCES) {
     try {
-      const r = await fetch(src, { signal: AbortSignal.timeout(20000) });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const r = await fetch(src, { signal: controller.signal });
+      clearTimeout(timeout);
       lines.push(...(await r.text()).split(/\r?\n/));
     } catch (e) { /* skip */ }
   }
@@ -122,7 +112,7 @@ class ProxyPool {
     let lines = [];
     if (args.proxyFile) {
       try { lines = fs.readFileSync(args.proxyFile, 'utf8').split(/\r?\n/); }
-      catch (e) { console.error(`[!] tidak bisa baca ${args.proxyFile}: ${e.message}`); process.exit(1); }
+      catch (e) { console.error(`[!] tidak bisa baca ${args.proxyFile}: ${e.message}`); }
     }
     if (args.proxy) lines.push(...args.proxy.split(','));
     if (!lines.length) lines = await fetchProxyLines();
@@ -365,14 +355,15 @@ async function ensureValidPool(pool, want, args) {
 }
 
 /* ============ AUTO ============ */
-let isRunning = false;
-let currentProgress = { status: 'idle', message: '', total: 0, current: 0, results: [] };
+let jobStatus = { running: false, progress: 0, total: 0, results: [], message: 'Idle' };
 
-async function runAuto(args, pool, onProgress) {
+async function runAuto(args, pool) {
   const want = args.count;
   const results = [];
   const limits = { premium: 0, standard: 0, basic: 0 };
   let refetches = 0;
+
+  jobStatus = { running: true, progress: 0, total: want, results: [], message: 'Memulai...' };
 
   while (results.length < want) {
     await ensureValidPool(pool, Math.min(5, want - results.length + 2), args);
@@ -406,31 +397,32 @@ async function runAuto(args, pool, onProgress) {
           if (d.success && d.url) {
             const result = { plan, url: d.url, expires: d.expires, quality: d.quality, country: d.country, at: new Date().toISOString() };
             results.push(result);
-            const left = d.pool && d.pool.available;
-            console.log(`[${new Date().toISOString().slice(11, 19)}] ${plan.toUpperCase().padEnd(9)} | ${String(d.country).padEnd(5)} | ${String(d.quality).padEnd(10)} | sisa ${left} | exp ${d.expires}`);
-            console.log(`    ${d.url}`);
             pool.reuse(proxy);
-            if (onProgress) onProgress({ total: want, current: results.length, results });
+            jobStatus.progress = results.length;
+            jobStatus.results = results;
+            jobStatus.message = `Mendapat ${results.length}/${want} token`;
+            console.log(`[+] ${results.length}/${want} - ${plan}: ${d.url}`);
           } else break;
         } catch (e) {
           if (e instanceof RotateError) { pool.fail(proxy); break; }
           if (e instanceof HttpError && e.status === 403 && isDailyLimit(e)) { limits[plan]++; break; }
-          if (e instanceof HttpError && e.status === 429) { console.log(`[!] 429 rate-limit di ${proxy.host}:${proxy.port}, rotasi...`); break; }
+          if (e instanceof HttpError && e.status === 429) { console.log(`[!] 429 rate-limit`); break; }
           if (e instanceof HttpError && e.status === 403 && /Session/i.test(String(e.data))) { pool.fail(proxy); break; }
-          console.log(`[!] ${plan} via ${proxy.host}:${proxy.port}: ${e.message}`); break;
+          console.log(`[!] ${plan}: ${e.message}`); break;
         }
       }
       v.used = true;
-      console.log(`[+] ${proxy.host}:${proxy.port} selesai -> rotasi (${results.length} total, ${pool.aliveValid()} proxy valid tersisa)`);
     } catch (e) { console.log(`[!] ${proxy.host}:${proxy.port}: ${e.message}`); }
   }
 
+  jobStatus.running = false;
+  jobStatus.message = `Selesai: ${results.length} token`;
+  
   const output = results.map(r =>
     `[${r.plan}] ${r.url} | exp ${r.expires} | ${r.quality} | ${r.country} | @${r.at}`).join('\n');
   
   fs.writeFileSync(args.out || 'tokens.txt', output + '\n');
   console.log(`\n[+] selesai: ${results.length} token -> ${args.out || 'tokens.txt'}`);
-  console.log(`[+] kena limit harian per plan: ${JSON.stringify(limits)}`);
   
   return { count: results.length, results, limits };
 }
@@ -439,72 +431,34 @@ async function runAuto(args, pool, onProgress) {
 // ROUTES
 // ============================================
 
-// Home
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Start auto generate
 app.post('/api/start', async (req, res) => {
-    if (isRunning) {
+    if (jobStatus.running) {
         return res.status(409).json({ success: false, error: 'Proses sedang berjalan' });
     }
 
     const { count = 5, plan = null } = req.body;
-    
-    isRunning = true;
-    currentProgress = { status: 'running', message: 'Memulai...', total: count, current: 0, results: [] };
-
-    res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
-    });
-
-    const onProgress = (data) => {
-        currentProgress = { ...currentProgress, ...data };
-        res.write(`data: ${JSON.stringify({ type: 'progress', ...currentProgress })}\n\n`);
-    };
 
     try {
-        const args = { 
-            count, 
-            plan, 
-            out: 'tokens.txt', 
-            scanConcurrency: 25 
-        };
+        const args = { count, plan, out: 'tokens.txt', scanConcurrency: 25 };
         const pool = await ProxyPool.load(args);
         
-        const result = await runAuto(args, pool, onProgress);
+        // Run in background
+        runAuto(args, pool);
         
-        currentProgress = { 
-            status: 'complete', 
-            message: 'Selesai!', 
-            total: result.count, 
-            current: result.count, 
-            results: result.results,
-            limits: result.limits
-        };
-        res.write(`data: ${JSON.stringify({ type: 'complete', ...currentProgress })}\n\n`);
+        res.json({ success: true, message: 'Proses dimulai' });
     } catch (error) {
-        currentProgress = { status: 'error', message: error.message, total: 0, current: 0, results: [] };
-        res.write(`data: ${JSON.stringify({ type: 'error', ...currentProgress })}\n\n`);
-    } finally {
-        isRunning = false;
-        res.end();
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Get status
 app.get('/api/status', (req, res) => {
-    res.json({ 
-        success: true, 
-        running: isRunning,
-        progress: currentProgress 
-    });
+    res.json({ success: true, ...jobStatus });
 });
 
-// Health
 app.get('/health', (req, res) => {
     res.json({
         status: 'healthy',
@@ -521,8 +475,3 @@ app.listen(PORT, () => {
     console.log(`🎯 Target: ${SITE}`);
     console.log('========================================');
 });
-
-module.exports = { 
-    tunnel, request, newSession, genToken, 
-    ProxyPool, parseProxyLine, solvePow, runAuto 
-};
